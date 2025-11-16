@@ -1,0 +1,8 @@
+venv/
+wiki727k/
+nas
+data/
+outputs/
+__pycache__/
+wandb/
+checkpoints/
