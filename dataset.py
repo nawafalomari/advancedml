@@ -28,7 +28,7 @@ def flatten_dataset(df, num_samples):
         if i >= num_samples:
             break
         i += 1
-        print(f"Processing sample {i} of {num_samples}")
+        # print(f"Processing sample {i} of {num_samples}")
         doc_id = row["id"]
         ids = json.loads(row["ids"])
         sents = json.loads(row["sentences"])
@@ -47,10 +47,14 @@ def flatten_dataset(df, num_samples):
 
     return pd.DataFrame(rows)
 
-df_train = flatten_dataset(df_train, 5500)
-df_val = flatten_dataset(df_val, 500)
-df_test = flatten_dataset(df_test, 500)
+train_size = 10000
+val_size = 5000
+test_size = 5000
 
-df_train.to_csv('data/train_flattened.csv', index=False)
-df_val.to_csv('data/val_flattened.csv', index=False)
-df_test.to_csv('data/test_flattened.csv', index=False)
+df_train = flatten_dataset(df_train, train_size)
+df_val = flatten_dataset(df_val, val_size)
+df_test = flatten_dataset(df_test, test_size)
+
+df_train.to_csv(f'data/train_flattened_{train_size}.csv', index=False)
+df_val.to_csv(f'data/val_flattened_{val_size}.csv', index=False)
+df_test.to_csv(f'data/test_flattened_{test_size}.csv', index=False)
