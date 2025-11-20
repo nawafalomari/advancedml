@@ -9,22 +9,69 @@ import os
 import torch.optim as opt
 import json
 from datetime import datetime
+import torch
+import time
+
+# include the default hyperparameters 
+# random search hyperparameters
+## ------------ choose best hyperparameters ------------
+# Option B — Choose hyperparameters with the lowest mean inner-CV loss
+# During nested CV, you already computed inner-CV scores for each hyperparameter set.
+# You can aggregate and pick the overall best.
+
+# train with the best hyperparameters
+# Evaluate best model on the chromadb benchmark framework
+
+# if we want to remove hyperparameters, remove SGD 
+
+
 
 EPOCHS = 5
-BATCH_SIZE = 32
+BATCH_SIZE = 64
 MODEL_NAME = "sentence-transformers/all-MiniLM-L6-v2"
 WARMUP_STEPS = 50
+EARLY_STOPPING_ENABLED = True
+EARLY_STOPPING_PATIENCE = 3
+EARLY_STOPPING_MIN_DELTA = 0.0002
+
+hyperparams = {
+    "lr": [2e-5, 1e-4, 5e-4],
+    "batch_size": [16, 64, 128, 192],
+    "optimizer": ["AdamW", "RMSprop"],
+    "num_pairs": [5, 25, 100],
+    "pick_technique": [],
+}
+
+
+class EarlyStoppingException(Exception):
+    """Raised when early stopping criteria are met."""
 
 def generate_pairs(df: pd.DataFrame, pick_technique: str = "next", num_pairs: int = 5):
+    """
+    Generate pairs for contrastive learning.
+
+    Args:
+        df: DataFrame containing the data
+        pick_technique: String indicating the pick technique to use (next, in_doc, cross_doc)
+        num_pairs: Maximum number of pairs to generate for each document
+
+    Returns:
+        List of pairs
+    """
     num_pairs = 1000000 if num_pairs is None else num_pairs
     
     pairs = []
     seen_pairs = set()  # Track pairs to avoid duplicates
     
-    all_docs = [(doc_id, group) for doc_id, group in df.groupby("doc_id")]
+    # Only sort for "next" technique which needs consecutive sentences
+    if pick_technique == "next":
+        all_docs = [(doc_id, group.sort_values("global_index").reset_index(drop=True)) 
+                    for doc_id, group in df.groupby("doc_id")]
+    else:
+        all_docs = [(doc_id, group.reset_index(drop=True)) 
+                    for doc_id, group in df.groupby("doc_id")]
 
-    for doc_id, group in df.groupby("doc_id"):
-        sents = group.sort_values("global_index").reset_index(drop=True)
+    for doc_id, sents in all_docs:
         
         if pick_technique == "next":
             # Generate consecutive pairs, limited to num_pairs per document
@@ -54,79 +101,91 @@ def generate_pairs(df: pd.DataFrame, pick_technique: str = "next", num_pairs: in
                     paragraphs[para_id] = []
                 paragraphs[para_id].append(row)
             
-            # Collect positive pairs (same paragraph)
-            positive_candidates = []
-            for para_id, para_sents in paragraphs.items():
-                if len(para_sents) >= 2:
-                    # Generate all possible pairs within this paragraph
-                    for i in range(len(para_sents)):
-                        for j in range(i + 1, len(para_sents)):
-                            row1 = para_sents[i]
-                            row2 = para_sents[j]
-                            pair_key = tuple(sorted([row1["sentence"], row2["sentence"]]))
-                            if pair_key not in seen_pairs:
-                                positive_candidates.append((row1, row2, pair_key))
+            # Sample positive pairs directly without creating all candidates
+            positive_pairs = []
+            positive_count = 0
+            max_attempts = num_pairs * 10  # Limit attempts to avoid infinite loops
+            attempts = 0
             
-            negative_candidates = []
+            # Get all paragraphs with at least 2 sentences
+            valid_paragraphs = [(para_id, para_sents) for para_id, para_sents in paragraphs.items() if len(para_sents) >= 2]
+            
+            while positive_count < num_pairs and attempts < max_attempts and valid_paragraphs:
+                attempts += 1
+                
+                # Pick a random paragraph
+                para_id, para_sents = random.choice(valid_paragraphs)
+                
+                # Pick two random different sentences from that paragraph
+                if len(para_sents) >= 2:
+                    row1, row2 = random.sample(para_sents, 2)
+                    pair_key = tuple(sorted([row1["sentence"], row2["sentence"]]))
+                    
+                    if pair_key not in seen_pairs:
+                        positive_pairs.append((row1, row2, pair_key))
+                        seen_pairs.add(pair_key)
+                        positive_count += 1
+            
+            # Sample negative pairs directly
+            negative_pairs = []
+            negative_count = 0
+            max_attempts = positive_count * 10
+            attempts = 0
+            
             if pick_technique == "in_doc":
-                # Collect negative pairs (different paragraphs)
+                # In-document negatives: different paragraphs within same document
                 para_ids = list(paragraphs.keys())
-                for i in range(len(para_ids)):
-                    for j in range(i + 1, len(para_ids)):
-                        para1_id = para_ids[i]
-                        para2_id = para_ids[j]
-                        for row1 in paragraphs[para1_id]:
-                            for row2 in paragraphs[para2_id]:
-                                pair_key = tuple(sorted([row1["sentence"], row2["sentence"]]))
-                                if pair_key not in seen_pairs:
-                                    negative_candidates.append((row1, row2, pair_key))
+                
+                if len(para_ids) >= 2:
+                    while negative_count < positive_count and attempts < max_attempts:
+                        attempts += 1
+                        
+                        # Pick two different paragraphs
+                        para1_id, para2_id = random.sample(para_ids, 2)
+                        
+                        # Pick random sentence from each
+                        row1 = random.choice(paragraphs[para1_id])
+                        row2 = random.choice(paragraphs[para2_id])
+                        
+                        pair_key = tuple(sorted([row1["sentence"], row2["sentence"]]))
+                        
+                        if pair_key not in seen_pairs:
+                            negative_pairs.append((row1, row2, pair_key))
+                            seen_pairs.add(pair_key)
+                            negative_count += 1
             
             elif pick_technique == "cross_doc":
-                # Collect negative pairs from cross-document sampling
-                # Get all other documents (excluding current doc)
-                other_docs = [(other_doc_id, other_group) for other_doc_id, other_group in all_docs if other_doc_id != doc_id]
-                
-                if len(other_docs) == 0:
-                    pass
-                else:
-                    # Determine how many random docs to pick (limit to available docs)
-                    n_docs_to_pick = len(positive_candidates)
-                    
-                    # Randomly sample n documents
-                    selected_other_docs = random.choices(other_docs, k=n_docs_to_pick)
-                    
-                    # For each selected document, pick one random sentence
-                    for other_doc_id, other_group in selected_other_docs:
-                        other_sents = other_group.sort_values("global_index").reset_index(drop=True)
-                        if len(other_sents) == 0:
-                            continue
+                # Cross-document negatives: sentences from different documents
+                if len(all_docs) > 1 and len(sents) > 0:
+                    while negative_count < positive_count and attempts < max_attempts:
+                        attempts += 1
                         
-                        # Pick one random sentence from this other document
-                        random_other_sent = other_sents.iloc[random.randint(0, len(other_sents) - 1)]
+                        # Pick random sentence from current doc
+                        current_row = sents.iloc[random.randint(0, len(sents) - 1)]
                         
-                        # Pair this random sentence with every sentence in the current document
-                        for idx, current_row in sents.iterrows():
+                        # Pick random document from all_docs, skip if it's the current one
+                        other_doc_id, other_sents = random.choice(all_docs)
+                        if other_doc_id == doc_id:
+                            continue  # Skip this iteration if we picked the same document
+                        
+                        if len(other_sents) > 0:
+                            # Pick random sentence from other document
+                            random_other_sent = other_sents.iloc[random.randint(0, len(other_sents) - 1)]
+                            
                             pair_key = tuple(sorted([current_row["sentence"], random_other_sent["sentence"]]))
+                            
                             if pair_key not in seen_pairs:
-                                negative_candidates.append((current_row, random_other_sent, pair_key))
-
-            # Randomly sample up to num_pairs positive pairs
-            np.random.shuffle(positive_candidates)
-            positive_selected = positive_candidates[:min(num_pairs, len(positive_candidates))]
-            
-            # Randomly sample up to num_pairs negative pairs
-            np.random.shuffle(negative_candidates)
-            negative_selected = negative_candidates[:min(num_pairs, len(negative_candidates))]
+                                negative_pairs.append((current_row, random_other_sent, pair_key))
+                                seen_pairs.add(pair_key)
+                                negative_count += 1
             
             # Add positive pairs
-            for row1, row2, pair_key in positive_selected:
+            for row1, row2, pair_key in positive_pairs:
                 pairs.append([row1["sentence"], row2["sentence"], 1])
-                seen_pairs.add(pair_key)
             
             # Add negative pairs
-            for row1, row2, pair_key in negative_selected:
+            for row1, row2, pair_key in negative_pairs:
                 pairs.append([row1["sentence"], row2["sentence"], 0])
-                seen_pairs.add(pair_key)
         
         else:
             raise ValueError(f"Unknown pick_technique: {pick_technique}. Must be 'next', 'in_doc', or 'cross_doc'")
@@ -247,7 +306,7 @@ def predict_boundaries_from_embeddings(embeddings, method="median", value=None):
 #     Evaluate all docs for a given embedding function
 # ============================================================
 def evaluate_docs(docs, embed_fn, name="model", threshold_method="median"):
-    print(f"\n========== Evaluating: {name} ==========")
+    print(f"----- Evaluating: {name} -----")
 
     metrics_per_doc = []
     ious, recalls, precisions = [], [], []
@@ -282,58 +341,138 @@ def evaluate_docs(docs, embed_fn, name="model", threshold_method="median"):
     }
 
     # print("\n------ Summary ------")
-    # print(summary)
+    print(summary)
+    print()
     return metrics_per_doc, summary
 
-def train_model(train_pairs, val_pairs, model, epochs=EPOCHS, batch_size=BATCH_SIZE, warmup_steps=WARMUP_STEPS):
+def train_model(
+    train_pairs,
+    val_pairs,
+    model: SentenceTransformer,
+    optimizer_name="AdamW",
+    lr=2e-5,
+    epochs=EPOCHS,
+    batch_size=BATCH_SIZE,
+    warmup_steps=WARMUP_STEPS,
+    early_stopping=EARLY_STOPPING_ENABLED,
+    early_stopping_patience=EARLY_STOPPING_PATIENCE,
+    early_stopping_min_delta=EARLY_STOPPING_MIN_DELTA,
+):
     train_examples = [InputExample(texts=[s1, s2], label=float(lb)) for (s1, s2, lb) in train_pairs]
-    train_dataloader = DataLoader(train_examples, batch_size=batch_size, shuffle=True)
+    train_dataloader = DataLoader(train_examples, batch_size=batch_size, shuffle=True, num_workers=8)
 
     val_examples = [InputExample(texts=[s1, s2], label=float(lb)) for (s1, s2, lb) in val_pairs]
     evaluator = EmbeddingSimilarityEvaluator(
         [ex.texts[0] for ex in val_examples],
         [ex.texts[1] for ex in val_examples],
         [ex.label for ex in val_examples],
-        name="val"
+        name="val",
+        batch_size=128
     )
+
+    # Select optimizer class
+    if optimizer_name == "Muon":
+        optimizer_class = opt.Muon
+    elif optimizer_name == "AdamW":
+        optimizer_class = opt.AdamW
+    elif optimizer_name == "SGD":
+        optimizer_class = opt.SGD
+    elif optimizer_name == "RMSprop":
+        optimizer_class = opt.RMSprop
+    else:
+        raise ValueError(f"Unknown optimizer: {optimizer_name}")
 
     train_loss = losses.ContrastiveLoss(model)
 
-    model.fit(
-        train_objectives=[(train_dataloader, train_loss)],
-        evaluator=evaluator,
-        evaluation_steps=100,
-        epochs=epochs,
-        warmup_steps=warmup_steps,
-        show_progress_bar=True
-    )
+    fit_callback = None
+    evaluations_without_improvement = 0
+    best_score = -np.inf
+
+    if early_stopping:
+        if evaluator is None:
+            raise ValueError("Early stopping requires an evaluator to compute validation scores.")
+
+        def _early_stopping_callback(score, epoch, steps):
+            nonlocal evaluations_without_improvement, best_score
+            if score is None:
+                return
+
+            score = float(score)
+            if score > best_score + early_stopping_min_delta:
+                best_score = score
+                evaluations_without_improvement = 0
+            else:
+                evaluations_without_improvement += 1
+
+            if evaluations_without_improvement >= early_stopping_patience :
+                raise EarlyStoppingException(
+                    f"Early stopping triggered after {evaluations_without_improvement} "
+                    f"evaluations without improvement (best score: {best_score:.4f})."
+                )
+
+        fit_callback = _early_stopping_callback
+
+    fit_kwargs = {
+        "train_objectives": [(train_dataloader, train_loss)],
+        "evaluator": evaluator,
+        "evaluation_steps": int(len(train_dataloader) * 0.2), # evaluate every 20% of the training data
+        # "logging_steps": min(int(len(train_dataloader) * 0.05), 10),
+        "epochs": epochs,
+        "warmup_steps": warmup_steps,
+        "optimizer_class": optimizer_class,
+        "optimizer_params": {'lr': lr},
+        "show_progress_bar": False,
+        "output_path": None,
+        "save_best_model": False,
+    }
+    if fit_callback is not None:
+        fit_kwargs["callback"] = fit_callback
+
+    try:
+        model.fit(**fit_kwargs)
+    except EarlyStoppingException as exc:
+        print(str(exc))
     return model
 
 def train_evaluate_model(df_train, df_val, hyperparams):
-    # Generate pairs
-    train_pairs = generate_pairs(df_train)
-    val_pairs = generate_pairs(df_val)
-    
+    # Generate pairs using hyperparameters
+    start_time = time.time()
+    train_pairs = generate_pairs(df_train, pick_technique=hyperparams['pick_technique'], num_pairs=hyperparams['num_pairs'])
+    val_pairs = generate_pairs(df_val, pick_technique=hyperparams['pick_technique'], num_pairs=hyperparams['num_pairs'])
+    elapsed_time = time.time() - start_time
+    print(f"    Generating pairs completed in {elapsed_time:.2f} seconds ({elapsed_time/60:.2f} minutes)")
+
     # Train model with current hyperparameters
     model = SentenceTransformer(MODEL_NAME)
+    start_time = time.time()
     model = train_model(
         train_pairs, 
         val_pairs, 
         model,
-        epochs=hyperparams['epochs'],
+        optimizer_name=hyperparams['optimizer'],
+        lr=hyperparams['lr'],
+        epochs=EPOCHS,
         batch_size=hyperparams['batch_size'],
         warmup_steps=WARMUP_STEPS
     )
-    
+    elapsed_time = time.time() - start_time
+    print(f"    Training completed in {elapsed_time:.2f} seconds ({elapsed_time/60:.2f} minutes)")
+
     # Evaluate on inner validation set
     docs_val = df_to_eval_docs(df_val)
-    embed_fn = lambda sents: model.encode(sents, convert_to_numpy=True)
+    embed_fn = lambda sents: model.encode(sents, convert_to_numpy=True, batch_size=64, show_progress_bar=False)
     _, summary = evaluate_docs(docs_val, embed_fn, 
                                 name="Inner Fold", 
-                                threshold_method="median")
+                                threshold_method="mean")
+    
+    # Clean up memory
+    del model
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+    
     return summary
 
-def nested_cross_validation(data, df_test, n_outer_folds=5, n_inner_folds=3, output_file="nested_cv_results.json"):
+def nested_cross_validation(data, n_outer_folds, n_inner_folds, name, cv_seed):
     """
     Nested cross-validation:
     - Outer CV: for robust performance estimation
@@ -341,53 +480,28 @@ def nested_cross_validation(data, df_test, n_outer_folds=5, n_inner_folds=3, out
     
     Args:
         data: Training data dataframe
-        df_test: Test data dataframe
         n_outer_folds: Number of outer CV folds
         n_inner_folds: Number of inner CV folds
-        output_file: Path to JSON file to save results
     
     Returns:
         outer_results: List of results for each outer fold
-        summary_test: Final test set evaluation summary
+        results_dict: Dictionary containing all nested CV results and hyperparameter search results
     """
+    global hyperparam_grid
     
-    #? Hyperparameter grid to search i dont know what else to add here
-    # hyperparams = {
-    #     "lr": [1e-5, 2e-5, 5e-5],
-    #     "batch_size": [16, 32, 64],
-    #     "epochs": [3,5],
-    #     "num_pairs": [3, 5, 10, 25, 100],
-    #     "pick_technique": ["next", "in_doc", "cross_doc"],
-    # }
-    hyperparams = {
-        "lr": [1e-5],
-        "batch_size": [64],
-        "epochs": [1],
-        "num_pairs": [1, 100, 1000000],
-        "pick_technique": ["next", "in_doc", "cross_doc"],
-    }
-
-    hyperparam_grid = []
-    for lr in hyperparams["lr"]:
-        for batch_size in hyperparams["batch_size"]:
-            for epochs in hyperparams["epochs"]:
-                for num_pairs in hyperparams["num_pairs"]:
-                    for pick_technique in hyperparams["pick_technique"]:
-                        hyperparam_grid.append({
-                            "lr": lr,
-                            "batch_size": batch_size,
-                            "epochs": epochs,
-                            "num_pairs": num_pairs,
-                            "pick_technique": pick_technique
-                        })
-
+    # Create results directory if it doesn't exist
+    results_dir = "results/cv"
+    os.makedirs(results_dir, exist_ok=True)
+    
+    # Set up file paths
+    intermediate_file = os.path.join(results_dir, f"hyperparameter_tuning_cv_{name}_intermediate.json")
+    final_file = os.path.join(results_dir, f"hyperparameter_tuning_cv_{name}.json")
     
     # Get unique document IDs for stratified splitting
     doc_ids = data['doc_id'].unique()
     
-    outer_cv = KFold(n_splits=n_outer_folds, shuffle=True)
+    outer_cv = KFold(n_splits=n_outer_folds, shuffle=True, random_state=cv_seed)
     outer_results = []
-    
     # Store comprehensive results for JSON output
     results_dict = {
         "experiment_info": {
@@ -395,9 +509,10 @@ def nested_cross_validation(data, df_test, n_outer_folds=5, n_inner_folds=3, out
             "model_name": MODEL_NAME,
             "n_outer_folds": n_outer_folds,
             "n_inner_folds": n_inner_folds,
+            "n_random_samples_per_fold": 10,
+            "hyperparameter_grid_size": len(hyperparam_grid),
             "hyperparameter_grid": hyperparam_grid,
-            "train_docs": len(doc_ids),
-            "test_docs": df_test['doc_id'].nunique()
+            "train_docs": len(doc_ids)
         },
         "outer_folds": [],
         "summary": {},
@@ -406,6 +521,7 @@ def nested_cross_validation(data, df_test, n_outer_folds=5, n_inner_folds=3, out
     
     print(f"\n{'='*80}")
     print(f"NESTED CROSS-VALIDATION: {n_outer_folds} outer folds, {n_inner_folds} inner folds")
+    print(f"Total hyperparameter combinations: {len(hyperparam_grid)}")
     print(f"{'='*80}\n")
     
     # ========== OUTER CV LOOP ==========
@@ -428,6 +544,7 @@ def nested_cross_validation(data, df_test, n_outer_folds=5, n_inner_folds=3, out
             "train_docs": int(len(train_docs)),
             "test_docs": int(len(test_docs)),
             "hyperparameter_search": [],
+            "sampled_hyperparams": [],
             "best_hyperparams": None,
             "best_inner_score": None,
             "outer_test_results": {}
@@ -439,11 +556,17 @@ def nested_cross_validation(data, df_test, n_outer_folds=5, n_inner_folds=3, out
         best_score = -np.inf
         best_hyperparams = None
         
-        for hp_idx, hyperparams in enumerate(hyperparam_grid, 1):
-            print(f"\nTesting hyperparams {hp_idx}/{len(hyperparam_grid)}: {hyperparams}")
+        # Random search: sample 10 hyperparameter sets without replacement for this outer fold
+        n_random_samples = min(10, len(hyperparam_grid))
+        sampled_hyperparams = random.sample(hyperparam_grid, n_random_samples)
+        fold_info["sampled_hyperparams"] = sampled_hyperparams
+        
+        for hp_idx, hyperparams in enumerate(sampled_hyperparams, 1):
+            print(f"\nTesting hyperparams {hp_idx}/{n_random_samples}: {hyperparams}")
             inner_scores = []
             inner_fold_results = []
             
+            start_time = time.time()
             for inner_fold, (inner_train_idx, inner_val_idx) in enumerate(inner_cv.split(train_docs), 1):
                 inner_train_docs = train_docs[inner_train_idx]
                 inner_val_docs = train_docs[inner_val_idx]
@@ -451,7 +574,7 @@ def nested_cross_validation(data, df_test, n_outer_folds=5, n_inner_folds=3, out
                 df_inner_train = data[data['doc_id'].isin(inner_train_docs)]
                 df_inner_val = data[data['doc_id'].isin(inner_val_docs)]
                 
-                print(f"  Inner fold {inner_fold}")
+                print(f"\n===== Inner fold {inner_fold} ======")
 
                 summary = train_evaluate_model(df_inner_train, df_inner_val, hyperparams)
                 
@@ -463,6 +586,9 @@ def nested_cross_validation(data, df_test, n_outer_folds=5, n_inner_folds=3, out
                     "precision": float(summary['precision_mean'])
                 })
             
+            elapsed_time = time.time() - start_time
+            print(f"    Inner fold {inner_fold} completed in {elapsed_time:.2f} seconds ({elapsed_time/60:.2f} minutes)")
+
             # Average score across inner folds
             avg_inner_score = np.mean(inner_scores)
             print(f"  Average IoU for hyperparams {hyperparams}: {avg_inner_score:.4f}")
@@ -507,6 +633,35 @@ def nested_cross_validation(data, df_test, n_outer_folds=5, n_inner_folds=3, out
         
         results_dict["outer_folds"].append(fold_info)
         
+        # Calculate and update summary stats with current folds
+        current_ious = [r['iou'] for r in outer_results]
+        current_recalls = [r['recall'] for r in outer_results]
+        current_precisions = [r['precision'] for r in outer_results]
+        
+        if len(current_ious) > 0:
+            results_dict["summary"] = {
+                "iou": {
+                    "mean": float(np.mean(current_ious)),
+                    "std": float(np.std(current_ious)),
+                    "values": [float(x) for x in current_ious]
+                },
+                "recall": {
+                    "mean": float(np.mean(current_recalls)),
+                    "std": float(np.std(current_recalls)),
+                    "values": [float(x) for x in current_recalls]
+                },
+                "precision": {
+                    "mean": float(np.mean(current_precisions)),
+                    "std": float(np.std(current_precisions)),
+                    "values": [float(x) for x in current_precisions]
+                }
+            }
+        
+        # Save intermediate results after each outer fold
+        with open(intermediate_file, 'w') as f:
+            json.dump(results_dict, f, indent=2)
+        print(f"\nIntermediate results saved to {intermediate_file}")
+        
         print(f"\nOuter Fold {outer_fold} Results:")
         print(f"  IoU: {summary_outer['iou_mean']:.4f}")
         print(f"  Recall: {summary_outer['recall_mean']:.4f}")
@@ -550,79 +705,67 @@ def nested_cross_validation(data, df_test, n_outer_folds=5, n_inner_folds=3, out
         print(f"  Fold {r['fold']}: IoU={r['iou']:.4f}, Recall={r['recall']:.4f}, "
               f"Precision={r['precision']:.4f}, Hyperparams={r['best_hyperparams']}")
     
-    # ========== FINAL EVALUATION ON HELD-OUT TEST SET ==========
+    # Save final results to JSON file
     print(f"\n{'='*80}")
-    print(f"FINAL EVALUATION ON HELD-OUT TEST SET")
+    print(f"Saving final results to {final_file}")
     print(f"{'='*80}")
     
-    # Find most common best hyperparameters
-    from collections import Counter
-    hyperparam_counts = Counter([str(r['best_hyperparams']) for r in outer_results])
-    most_common_hp_str = hyperparam_counts.most_common(1)[0][0]
-    
-    # Convert back to dict (hacky but works)
-    for r in outer_results:
-        if str(r['best_hyperparams']) == most_common_hp_str:
-            final_hyperparams = r['best_hyperparams']
-            break
-    
-    print(f"\nTraining final model with most common hyperparameters: {final_hyperparams}")
-        
-    summary_test = train_evaluate_model(data, df_test, final_hyperparams)
-    
-    print("\n--- Final Test Set Evaluation ---")
-    
-    print(f"\n{'='*80}")
-    print(f"FINAL TEST SET RESULTS")
-    print(f"{'='*80}")
-    print(f"IoU: {summary_test['iou_mean']:.4f}")
-    print(f"Recall: {summary_test['recall_mean']:.4f}")
-    print(f"Precision: {summary_test['precision_mean']:.4f}")
-    print(f"\nNested CV Mean (±std): IoU={np.mean(ious):.4f}±{np.std(ious):.4f}")
-    
-    # Store final test results
-    results_dict["final_test"] = {
-        "hyperparams_used": final_hyperparams,
-        "iou": float(summary_test['iou_mean']),
-        "recall": float(summary_test['recall_mean']),
-        "precision": float(summary_test['precision_mean']),
-        "docs_evaluated": int(summary_test['docs_evaluated']),
-        "nested_cv_iou_mean": float(np.mean(ious)),
-        "nested_cv_iou_std": float(np.std(ious))
-    }
-    
-    # Save results to JSON file
-    print(f"\n{'='*80}")
-    print(f"Saving results to {output_file}")
-    print(f"{'='*80}")
-    
-    with open(output_file, 'w') as f:
+    with open(final_file, 'w') as f:
         json.dump(results_dict, f, indent=2)
     
-    print(f"Results saved successfully to {output_file}")
+    print(f"Final results saved successfully to {final_file}")
     
-    return outer_results, summary_test
+    return outer_results, results_dict
 
 
 if __name__ == "__main__":
-    df_train = pd.read_csv('data/train_flattened.csv')
-    df_val = pd.read_csv('data/val_flattened.csv')
-    df_test = pd.read_csv('data/test_flattened.csv')
+    # read the pick techniques from terminal args
+    import argparse
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--pick_technique", type=str, default="next", choices=["next", "in_doc", "cross_doc"])
+    parser.add_argument("--cv_seed", type=int, default=42) # mainly so I can parallelize the runs
+    args = parser.parse_args()
+    pick_technique = args.pick_technique
+    hyperparams["pick_technique"].append(pick_technique)
+
+    hyperparam_grid = []
+    for lr in hyperparams["lr"]:
+        for batch_size in hyperparams["batch_size"]:
+            for num_pairs in hyperparams["num_pairs"]:
+                for pick_technique in hyperparams["pick_technique"]:
+                    for optimizer in hyperparams["optimizer"]:
+                        if pick_technique == "next":
+                            num_pairs = 1000000
+                        new_set = {
+                            "lr": lr,
+                            "batch_size": batch_size,
+                            "num_pairs": num_pairs,
+                            "pick_technique": pick_technique,
+                            "optimizer": optimizer
+                        }
+                        if new_set not in hyperparam_grid:
+                            hyperparam_grid.append(new_set)
+    print(f"Hyperparameter grid: {hyperparam_grid}")
+
+    df_train = pd.read_csv('data/train_flattened_10000.csv')
+    # df_val = pd.read_csv('data/val_flattened_5000.csv')
+    # df_test = pd.read_csv('data/test_flattened_5000.csv')
     
     print(f"Original dataset sizes:")
     print(f"  Training documents: {df_train['doc_id'].nunique()}")
-    print(f"  Validation documents: {df_val['doc_id'].nunique()}")
-    print(f"  Test documents: {df_test['doc_id'].nunique()}")
+    # print(f"  Validation documents: {df_val['doc_id'].nunique()}")
+    # print(f"  Test documents: {df_test['doc_id'].nunique()}")
     
     # Combine train and validation sets
-    df_combined = pd.concat([df_train, df_val], ignore_index=True)
-    print(f"\nCombined train+val documents: {df_combined['doc_id'].nunique()}")
+    # df_combined = pd.concat([df_train, df_val], ignore_index=True)
+    # print(f"\nCombined train+val documents: {df_combined['doc_id'].nunique()}")
     
     # Run nested cross-validation
-    outer_results, test_results = nested_cross_validation(
-        df_combined, 
-        df_test, 
-        n_outer_folds=10,  # Outer CV for robust estimation
-        n_inner_folds=10   # Inner CV for hyperparameter tuning
+    outer_results, results_dict = nested_cross_validation(
+        df_train,    # df_combined,
+        n_outer_folds=5,  # Outer CV for robust estimation
+        n_inner_folds=5,   # Inner CV for hyperparameter tuning
+        name=f"pick_{pick_technique}",
+        cv_seed=args.cv_seed
     )
     
