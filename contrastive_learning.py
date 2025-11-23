@@ -346,9 +346,9 @@ def evaluate_docs(docs, embed_fn, name="model", threshold_method="median"):
     return metrics_per_doc, summary
 
 def train_model(
-    train_pairs,
-    val_pairs,
     model: SentenceTransformer,
+    train_pairs,
+    val_pairs = None,
     optimizer_name="AdamW",
     lr=2e-5,
     epochs=EPOCHS,
@@ -361,14 +361,16 @@ def train_model(
     train_examples = [InputExample(texts=[s1, s2], label=float(lb)) for (s1, s2, lb) in train_pairs]
     train_dataloader = DataLoader(train_examples, batch_size=batch_size, shuffle=True, num_workers=8)
 
-    val_examples = [InputExample(texts=[s1, s2], label=float(lb)) for (s1, s2, lb) in val_pairs]
-    evaluator = EmbeddingSimilarityEvaluator(
-        [ex.texts[0] for ex in val_examples],
-        [ex.texts[1] for ex in val_examples],
-        [ex.label for ex in val_examples],
-        name="val",
-        batch_size=128
-    )
+    evaluator = None
+    if val_pairs is not None:
+        val_examples = [InputExample(texts=[s1, s2], label=float(lb)) for (s1, s2, lb) in val_pairs]
+        evaluator = EmbeddingSimilarityEvaluator(
+            [ex.texts[0] for ex in val_examples],
+            [ex.texts[1] for ex in val_examples],
+            [ex.label for ex in val_examples],
+            name="val",
+            batch_size=128
+        )
 
     # Select optimizer class
     if optimizer_name == "Muon":
@@ -446,9 +448,9 @@ def train_evaluate_model(df_train, df_val, hyperparams):
     model = SentenceTransformer(MODEL_NAME)
     start_time = time.time()
     model = train_model(
+        model,
         train_pairs, 
         val_pairs, 
-        model,
         optimizer_name=hyperparams['optimizer'],
         lr=hyperparams['lr'],
         epochs=EPOCHS,

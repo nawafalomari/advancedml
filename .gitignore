@@ -6,3 +6,4 @@ outputs/
 __pycache__/
 wandb/
 checkpoints/
+models/
