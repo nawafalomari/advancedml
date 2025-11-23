@@ -15,29 +15,22 @@ df = pd.read_csv(csv_path)
 # Clean up chunker names for better readability
 def clean_chunker_name(name):
     """Simplify chunker names for display."""
-    # Extract key information
+    # Format: ClusterSemanticChunker_400 or ClusterSemanticChunker_400_trained
     if 'ClusterSemanticChunker' in name:
-        model = name.replace('ClusterSemanticChunker', '')
-        if 'all-MiniLM-L6-v2' in model:
-            # Format: all-MiniLM-L6-v2_400_0
-            parts = model.split('_')
-            if len(parts) >= 2:
-                size = parts[1]  # e.g., "400"
-                return f'ClusterSemantic (MiniLM, {size})'
-            return 'ClusterSemantic (MiniLM)'
-        elif 'models/best_model' in model:
-            # Format: models/best_model_400_0 (note: contains underscore in "best_model")
-            parts = model.split('_')
-            if len(parts) >= 3:
-                size = parts[2]  # Size is at index 2 because "best_model" contains an underscore
+        parts = name.replace('ClusterSemanticChunker_', '').split('_')
+        if len(parts) >= 1:
+            size = parts[0]  # e.g., "400" or "200"
+            if len(parts) > 1 and parts[1] == 'trained':
                 return f'ClusterSemantic (Ours, {size})'
-            return 'ClusterSemantic (Ours)'
+            else:
+                return f'ClusterSemantic (MiniLM, {size})'
+        return 'ClusterSemantic'
     elif 'KamradtModifiedChunker' in name:
-        model = name.replace('KamradtModifiedChunker', '')
-        if 'all-MiniLM-L6-v2' in model:
-            return 'KamradtModified (MiniLM)'
-        elif 'models/best_model' in model:
+        parts = name.replace('KamradtModifiedChunker_', '').split('_')
+        if len(parts) > 1 and parts[1] == 'trained':
             return 'KamradtModified (Ours)'
+        else:
+            return 'KamradtModified (MiniLM)'
     return name
 
 df['chunker_clean'] = df['chunker'].apply(clean_chunker_name)
@@ -45,23 +38,13 @@ df['chunker_clean'] = df['chunker'].apply(clean_chunker_name)
 # Extract configuration identifier (ignoring model type) for consistent coloring
 def get_config_id(name):
     """Extract configuration identifier that matches across model types."""
+    # Format: ClusterSemanticChunker_400 or ClusterSemanticChunker_400_trained
     if 'ClusterSemanticChunker' in name:
-        model = name.replace('ClusterSemanticChunker', '')
-        # Extract size regardless of whether it's MiniLM or Ours
-        if 'all-MiniLM-L6-v2' in model:
-            # Format: all-MiniLM-L6-v2_400_0
-            parts = model.split('_')
-            if len(parts) >= 2:
-                size = parts[1]  # e.g., "400" or "200"
-                return f'ClusterSemantic_{size}'
-            return 'ClusterSemantic'
-        elif 'models/best_model' in model:
-            # Format: models/best_model_400_0 (note: contains underscore in "best_model")
-            parts = model.split('_')
-            if len(parts) >= 3:
-                size = parts[2]  # Size is at index 2 because "best_model" contains an underscore
-                return f'ClusterSemantic_{size}'
-            return 'ClusterSemantic'
+        parts = name.replace('ClusterSemanticChunker_', '').split('_')
+        if len(parts) >= 1:
+            size = parts[0]  # e.g., "400" or "200"
+            return f'ClusterSemantic_{size}'
+        return 'ClusterSemantic'
     elif 'KamradtModifiedChunker' in name:
         return 'KamradtModified'
     return name
@@ -71,11 +54,11 @@ df['config_id'] = df['chunker'].apply(get_config_id)
 # Extract model type for grouping
 def get_model_type(name):
     """Extract model type (MiniLM vs Ours)."""
-    if 'all-MiniLM-L6-v2' in name:
-        return 'MiniLM'
-    elif 'models/best_model' in name:
+    # Format: ..._trained means Ours, otherwise MiniLM
+    if name.endswith('_trained'):
         return 'Ours'
-    return 'Unknown'
+    else:
+        return 'MiniLM'
 
 df['model_type'] = df['chunker'].apply(get_model_type)
 
@@ -91,20 +74,10 @@ def get_group_order(name):
     
     # Within each group, order by configuration
     if 'ClusterSemanticChunker' in name:
-        model = name.replace('ClusterSemanticChunker', '')
-        parts = model.split('_')
-        if 'all-MiniLM-L6-v2' in model:
-            # Format: all-MiniLM-L6-v2_400_0
-            if len(parts) >= 2:
-                size = int(parts[1]) if parts[1].isdigit() else 0
-            else:
-                size = 0
-        elif 'models/best_model' in model:
-            # Format: models/best_model_400_0 (size is at index 2)
-            if len(parts) >= 3:
-                size = int(parts[2]) if parts[2].isdigit() else 0
-            else:
-                size = 0
+        # Format: ClusterSemanticChunker_400 or ClusterSemanticChunker_400_trained
+        parts = name.replace('ClusterSemanticChunker_', '').split('_')
+        if len(parts) >= 1:
+            size = int(parts[0]) if parts[0].isdigit() else 0
         else:
             size = 0
         return (group, 0, -size)  # ClusterSemantic first, then by size (larger first)

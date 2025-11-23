@@ -7,6 +7,7 @@ Original file is located at
     https://colab.research.google.com/drive/1TMoKezZ0kcu6qFfhLqKPr8MEZG5D4zLs
 """
 
+import json
 from chunking_evaluation.chunking import FixedTokenChunker, RecursiveTokenChunker, ClusterSemanticChunker, LLMSemanticChunker, KamradtModifiedChunker
 from chunking_evaluation import GeneralEvaluation
 from chunking_evaluation.utils import openai_token_count
@@ -48,13 +49,13 @@ class SentenceTransformerEF(EmbeddingFunction):
 trained_ef = SentenceTransformerEF(TRAINED_MODEL_PATH)
 ef = SentenceTransformerEF(MODEL_NAME)
 
-chunkers = [
-    ClusterSemanticChunker(embedding_function=ef, max_chunk_size=400),
-    ClusterSemanticChunker(embedding_function=ef, max_chunk_size=200),
-    KamradtModifiedChunker(avg_chunk_size = 400, embedding_function = ef),
-    ClusterSemanticChunker(embedding_function=trained_ef, max_chunk_size=400),
-    ClusterSemanticChunker(embedding_function=trained_ef, max_chunk_size=200),
-    KamradtModifiedChunker(avg_chunk_size = 400, embedding_function = trained_ef),
+chunkers = {
+    "ClusterSemanticChunker_400": ClusterSemanticChunker(embedding_function=ef, max_chunk_size=400),
+    "ClusterSemanticChunker_200": ClusterSemanticChunker(embedding_function=ef, max_chunk_size=200),
+    "KamradtModifiedChunker_400": KamradtModifiedChunker(avg_chunk_size = 400, embedding_function = ef),
+    "ClusterSemanticChunker_400_trained": ClusterSemanticChunker(embedding_function=trained_ef, max_chunk_size=400),
+    "ClusterSemanticChunker_200_trained": ClusterSemanticChunker(embedding_function=trained_ef, max_chunk_size=200),
+    "KamradtModifiedChunker_400_trained": KamradtModifiedChunker(avg_chunk_size = 400, embedding_function = trained_ef),
 
     # RecursiveTokenChunker(chunk_size=800, chunk_overlap=400, length_function=openai_token_count),
     # FixedTokenChunker(chunk_size=800, chunk_overlap=400, encoding_name="cl100k_base"),
@@ -65,28 +66,25 @@ chunkers = [
     # RecursiveTokenChunker(chunk_size=200, chunk_overlap=0, length_function=openai_token_count),
     # FixedTokenChunker(chunk_size=200, chunk_overlap=0, encoding_name="cl100k_base"),
 
-]
+}
 
 evaluation = GeneralEvaluation()
 
 results = []
 
-df = pd.DataFrame()
-
-
-for i, chunker in enumerate(chunkers):
-    print(f"Evaluating chunker {i+1} of {len(chunkers)}")
+for name, chunker in chunkers.items():
+    print(f"Evaluating chunker {name}")
     result = evaluation.run(chunker, ef, retrieve=5)
-    del result['corpora_scores']  # Remove detailed scores for brevity
-    chunk_size = chunker._chunk_size if hasattr(chunker, '_chunk_size') else 0
-    chunk_overlap = chunker._chunk_overlap if hasattr(chunker, '_chunk_overlap') else 0
-    model_name = ""
-    if hasattr(chunker, 'embedding_function'):
-        model_name = chunker.embedding_function.model_name
-    result['chunker'] = chunker.__class__.__name__ + f"{model_name}_{chunk_size}_{chunk_overlap}"
+    # store the scores in a json file
+    with open(f'results/chroma_db_evaluate/{name}_scores.json', 'w') as f:
+        json.dump(result['corpora_scores'], f)
+    
+    del result['corpora_scores']
+    
+    result['chunker'] = name
     results.append(result)
 
-    # Update the DataFrame
-    df = pd.DataFrame(results)
+# Update the DataFrame
+df = pd.DataFrame(results)
 
-df.to_csv('results/chroma_db_evaluate/chunking_results_extra.csv', index=False)
+df.to_csv('results/chroma_db_evaluate/chunking_results.csv', index=False)
